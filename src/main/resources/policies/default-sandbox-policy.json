@@ -1,0 +1,82 @@
+{
+  "$schema": "sandbox-policy-schema",
+  "version": "1.0.0",
+  "description": "Default Aegis PreFlight sandbox policy",
+
+  "filesystem": {
+    "workspace": ".",
+    "readOnly": [],
+    "writePaths": ["src/", "tests/", "target/"],
+    "denied": [
+      ".env",
+      ".env.*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      ".ssh/",
+      ".gnupg/",
+      ".aws/",
+      ".docker/",
+      "**/secrets",
+      "**/credentials"
+    ],
+    "readOnlyPaths": [
+      "pom.xml",
+      "package.json",
+      "package-lock.json",
+      "requirements.txt",
+      "*.md"
+    ]
+  },
+
+  "network": {
+    "mode": "restricted",
+    "allowedHosts": [
+      "api.anthropic.com",
+      "api.openai.com",
+      "registry.npmjs.org",
+      "repo1.maven.org",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ],
+    "blockedHosts": ["*"],
+    "allowLocalhost": false
+  },
+
+  "tools": {
+    "allowed": [
+      "java", "javac", "mvn", "gradle",
+      "node", "npm", "npx", "yarn", "pnpm",
+      "python3", "pip", "pip3",
+      "git", "grep", "find", "ls", "cat", "head", "tail",
+      "wc", "sort", "uniq", "diff", "sed", "awk",
+      "mkdir", "cp", "mv", "touch", "chmod"
+    ],
+    "blocked": [
+      "curl", "wget", "ssh", "scp", "rsync",
+      "nc", "ncat", "socat", "telnet",
+      "docker", "kubectl", "helm",
+      "sudo", "su", "chmod 777", "chown",
+      "eval", "exec", "dd", "mkfs",
+      "iptables", "nftables", "ufw"
+    ],
+    "blockedPatterns": [
+      "curl * | sh",
+      "curl * | bash",
+      "wget * | sh",
+      "wget * | bash",
+      "chmod 777 *"
+    ]
+  },
+
+  "resources": {
+    "memory": "512m",
+    "cpus": "1",
+    "tmpfsSize": "64m",
+    "pidsLimit": 256,
+    "ulimits": {
+      "nofile": 1024,
+      "nproc": 256
+    }
+  }
+}
