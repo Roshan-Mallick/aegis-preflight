@@ -1,0 +1,141 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="utf-8">
+<title>Aegis PreFlight — Application Stack</title>
+<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml><![endif]-->
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; margin: 2.5cm; color: #1a1a2e; }
+  h1 { font-size: 20pt; color: #7c3aed; border-bottom: 2px solid #7c3aed; padding-bottom: 6px; }
+  h2 { font-size: 14pt; color: #4c1d95; margin-top: 18px; }
+  h3 { font-size: 12pt; color: #333; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+  th, td { border: 1px solid #999; padding: 5px 8px; font-size: 10pt; text-align: left; vertical-align: top; }
+  th { background: #ede9fe; }
+  code { font-family: Consolas, monospace; background: #f3f0ff; padding: 1px 3px; }
+  .meta { color: #666; font-size: 9pt; }
+  li { margin-bottom: 3px; }
+</style>
+</head>
+<body>
+
+<h1>Aegis PreFlight — Application Stack</h1>
+<p class="meta">Document version: v0.1.2 &nbsp;|&nbsp; Date: 21 Aug 2026 &nbsp;|&nbsp; Repo: github.com/Roshan-Mallick/aegis-preflight</p>
+
+<h2>1. What it is</h2>
+<p>A desktop security control layer for AI coding agents, built as <b>two gates</b>:</p>
+<ul>
+  <li><b>Gate 1 — AEGIS (entry):</b> runs the agent inside a locked-down Docker sandbox (no network, read-only rootfs, capped resources) while a rule-based monitor flags suspicious activity.</li>
+  <li><b>Gate 2 — PreFlight (exit):</b> before code is released to the real filesystem, three deterministic scanners (Gitleaks, Semgrep, Trivy) inspect it. Verdict BLOCK → agent self-fixes → rescan, looping until PASS.</li>
+</ul>
+<p>Every decision is persisted to a SHA-256 hash-chained SQLite audit log. An LLM packed inside the app writes human-readable incident reports — <b>advisory only, never the security authority</b>.</p>
+
+<h2>2. Language &amp; Runtime</h2>
+<table>
+  <tr><th>Layer</th><th>Technology</th><th>Notes</th></tr>
+  <tr><td>Language</td><td>Java 17</td><td>Records, sealed enums via switch expressions</td></tr>
+  <tr><td>UI toolkit</td><td>JavaFX 17.0.14 (controls, graphics, fxml)</td><td>Dark CSS theme; SplitPane report layout</td></tr>
+  <tr><td>Runtime image</td><td>jlink custom image</td><td>java.se + javafx.* + jdk.unsupported + jdk.crypto.ec — shipped inside the .deb, no system JRE/OpenJFX needed</td></tr>
+</table>
+
+<h2>3. Build &amp; Packaging</h2>
+<table>
+  <tr><th>Stage</th><th>Tool</th><th>Output</th></tr>
+  <tr><td>Build</td><td>Maven 3.9 + maven-shade-plugin</td><td>aegis-preflight-0.1.2-all.jar (shaded fat jar)</td></tr>
+  <tr><td>Runtime assembly</td><td>jlink (+ Gluon JavaFX jmods, pinned to pom version)</td><td>/opt/aegis-preflight/runtime</td></tr>
+  <tr><td>Package</td><td>fakeroot + dpkg-deb (zstd)</td><td>aegis-preflight_0.1.2_amd64.deb (~1.2 GB)</td></tr>
+  <tr><td>Distribution</td><td>GitHub Releases</td><td>.deb asset (&lt; 2 GiB limit)</td></tr>
+</table>
+
+<h2>4. Gate 1 — AEGIS Sandbox</h2>
+<table>
+  <tr><th>Component</th><th>Implementation</th></tr>
+  <tr><td>Container control</td><td>Docker CLI driven via ProcessBuilder (no docker-java dependency); unique container per run, torn down automatically</td></tr>
+  <tr><td>Isolation flags</td><td>--network=none, read-only rootfs, memory/CPU/pids/tmpfs caps from policy JSON</td></tr>
+  <tr><td>Policy engine</td><td>PolicyEngine reads default-sandbox-policy.json — filesystem allow/deny globs, network modes (NONE/RESTRICTED/FULL), tool allow/block lists, resource limits → DockerFlagBuilder</td></tr>
+  <tr><td>Activity monitoring</td><td>ActivityMonitor parses structured AEGIS-EVENT lines + docker events; rules like R-FS-OUTSIDE (escape attempt), R-NET-ANY (any egress) produce flagged events</td></tr>
+  <tr><td>File tracking</td><td>sha256sum snapshots before/after each agent run → ADDED/MODIFIED/DELETED diffs</td></tr>
+</table>
+
+<h2>5. Gate 2 — PreFlight Scanners (all offline)</h2>
+<table>
+  <tr><th>Scanner</th><th>Catches</th><th>Offline strategy</th></tr>
+  <tr><td>Gitleaks (bundled binary)</td><td>Hardcoded secrets</td><td>detect --no-git, local ruleset, redacted output</td></tr>
+  <tr><td>Semgrep (host pip install)</td><td>SAST bugs</td><td>Bundled pinned rule snapshot in resources/semgrep-rules; --metrics=off + SEMGREP_SEND_METRICS=off + SEMGREP_ENABLE_VERSION_CHECK=0 — zero telemetry, never registry configs</td></tr>
+  <tr><td>Trivy (bundled binary)</td><td>Dependency CVEs</td><td>--offline-scan --skip-db-update against DB cached once at ~/.cache/trivy/db by setup-offline.sh</td></tr>
+</table>
+<p>Verdicts are computed deterministically: CRITICAL/HIGH → BLOCK, MEDIUM → WARNING, LOW/INFO → PASS. On BLOCK, findings.json is written into the sandbox and the agent self-fixes (max 3 retries) before release.</p>
+
+<h2>6. Packed LLM Subsystem (zero external AI dependencies)</h2>
+<table>
+  <tr><th>Piece</th><th>Choice</th><th>Details</th></tr>
+  <tr><td>Inference engine</td><td>llama.cpp <code>llama-server</code> build b10549</td><td>Shipped in /opt/aegis-preflight/llm/bin with its ggml libraries; CPU inference</td></tr>
+  <tr><td>Model</td><td>Qwen2.5-1.5B-Instruct GGUF Q4_K_M (~1.1 GB)</td><td>Apache-2.0 license (safe to redistribute); sha256-pinned at build time</td></tr>
+  <tr><td>Lifecycle</td><td>EmbeddedLLM manager</td><td>Auto-starts when the app opens or on first report; adopts an already-running healthy instance; walks ports 11434→11438 if occupied; stopped cleanly on exit</td></tr>
+  <tr><td>API</td><td>OpenAI-compatible /v1/chat/completions</td><td>Loopback only (127.0.0.1); temperature 0, max 220 tokens, prompt caching</td></tr>
+  <tr><td>Cold-start policy</td><td>Bounded retry budget</td><td>Instant deterministic structured report first; LLM narrative upgrades it in place from a background thread (max 5 attempts × 25 s timeout, progressive backoff); silent degradation, UI never blocks</td></tr>
+  <tr><td>Security invariant</td><td>Advisory only</td><td>LocalSecurityLLM has no write path to severity or verdict values</td></tr>
+</table>
+
+<h2>7. Audit &amp; Persistence</h2>
+<table>
+  <tr><th>Component</th><th>Technology</th></tr>
+  <tr><td>Audit log</td><td>SQLite via xerial sqlite-jdbc 3.45.1.0 (~/.aegis/audit.db)</td></tr>
+  <tr><td>Tamper evidence</td><td>SHA-256 hash chain over every event row; one-click chain verification</td></tr>
+  <tr><td>Events recorded</td><td>SANDBOX_START, scan results, individual findings, VERDICT_BLOCK/PASS, FIX_APPLIED, RELEASED, MANUAL_REVIEW</td></tr>
+  <tr><td>Incident reports</td><td>IncidentReportStore (SQLite) alongside the audit chain</td></tr>
+</table>
+
+<h2>8. Libraries</h2>
+<table>
+  <tr><th>Library</th><th>Version</th><th>Purpose</th></tr>
+  <tr><td>Gson</td><td>2.10.1</td><td>All JSON parsing (scanner reports, policies, LLM payloads)</td></tr>
+  <tr><td>SLF4J + Logback</td><td>2.0.12 / 1.5.3</td><td>Logging</td></tr>
+  <tr><td>JUnit Jupiter</td><td>5.10.2</td><td>Test scope</td></tr>
+  <tr><td>java.net.http</td><td>JDK built-in</td><td>Loopback HTTP to the packed LLM (no extra client library)</td></tr>
+</table>
+
+<h2>9. Verification Tooling</h2>
+<ul>
+  <li><b>DemoRunner</b> — headless end-to-end regression: isolation probe → planted secret/SAST bug/vulnerable pin → BLOCK → findings.json self-fix → rescan PASS → hash-chain verify → packed-engine LLM report. Exits non-zero on any failure.</li>
+  <li><b>strace network audit</b> — full pipeline traced with connect/sendto; proof that only loopback addresses are contacted (packed LLM + loopback DNS).</li>
+  <li><b>Extracted-package test</b> — the built .deb is unpacked and launched exactly as installed to prove the bundled runtime, scanners and LLM work standalone.</li>
+  <li><b>UI instrumentation</b> — -Daegis.autoscan / -Daegis.report-out / -Daegis.screenshot drive automated GUI checks without external tools.</li>
+</ul>
+
+<h2>10. Offline Guarantees (after one-time setup)</h2>
+<table>
+  <tr><th>Concern</th><th>Status</th></tr>
+  <tr><td>Cloud LLM endpoints</td><td>None exist in code — loopback only</td></tr>
+  <tr><td>Scanner registries / telemetry</td><td>Bundled rules; metrics + version checks disabled</td></tr>
+  <tr><td>Vulnerability DB</td><td>Cached once; scans run --offline-scan</td></tr>
+  <tr><td>Sandboxed agent egress</td><td>--network=none (its own API access is a deliberate policy choice, not Aegis's)</td></tr>
+  <tr><td>Licensing / telemetry calls</td><td>None anywhere in the shipped code path</td></tr>
+</table>
+
+<h2>11. Repository Layout</h2>
+<pre>
+aegis-preflight-app/
+├── pom.xml                          Maven build (shade → fat jar)
+├── src/main/java/aegis/
+│   ├── gui/                         JavaFX app, main layout, launcher
+│   ├── ai/                          EmbeddedLLM + LocalSecurityLLM (packed LLM)
+│   ├── preflight/                   ScanEngine + Gitleaks/Semgrep/Trivy wrappers
+│   ├── loop/                        RemediationLoop (BLOCK→fix→rescan)
+│   ├── sandbox/                     DockerSandbox, SandboxManager
+│   ├── policy/                      PolicyEngine + JSON policy models
+│   ├── agent/                       AgentRunner, file snapshots/diffs
+│   ├── monitor/                     ActivityMonitor + events
+│   ├── audit/                       AuditLogger, hash chain, incident store
+│   └── cli/                         DemoRunner headless regression
+├── resources/
+│   ├── semgrep-rules/               Bundled pinned SAST rules
+│   ├── bin/{trivy,gitleaks}         Bundled scanner binaries
+│   └── llm/{bin,models}/            Packed llama-server + GGUF (gitignored,
+│                                    fetched pinned by build-deb.sh)
+scripts/build-deb.sh                 Self-contained .deb builder
+scripts/setup-offline.sh             One-time offline provisioning
+dist/                                Built .deb artifacts
+</pre>
+
+</body>
+</html>
