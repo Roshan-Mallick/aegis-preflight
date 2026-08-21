@@ -25,8 +25,8 @@ import java.util.List;
  *      it -> BLOCK
  *   3. Agent self-fixes from findings.json -> rescan -> PASS
  *   4. Audit log hash chain verifies -> integrity confirmed
- *   5. Local LLM (Ollama) generates the incident report — advisory only,
- *      never part of the BLOCK/PASS decision
+ *   5. Local LLM (bundled engine, packed in-app) generates the incident
+ *      report — advisory only, never part of the BLOCK/PASS decision
  *   6. Competitive matrix mapping printed for the slides
  *
  * Exits 0 only if every step passes with no manual intervention.
@@ -165,7 +165,7 @@ public class DemoRunner {
             String llmReport = aegis.ai.LocalSecurityLLM.generateReportOffline(
                 lastRoundFindings(result), sandboxEvents(flagged), 120_000);
             boolean llmOk = llmReport != null && !llmReport.isBlank() && !llmReport.startsWith("{");
-            check("local LLM produced a human-readable incident report (localhost:11434)", llmOk);
+            check("local LLM produced a human-readable incident report (packed engine, loopback only)", llmOk);
             if (llmOk) {
                 System.out.println("  --- Security Report (generated on-device by llama3.2:3b) ---");
                 for (String line : llmReport.split("\n")) {
@@ -257,7 +257,7 @@ public class DemoRunner {
         System.out.println("  Gitleaks/Semgrep/Trivy offline BLOCK->FIX -> vs SecurePilot: deterministic scanners decide, not LLM");
         System.out.println("  Hash-chained SQLite audit + verify   -> vs Semgrep Guardian: tamper-evident local trail");
         System.out.println("  findings.json agent self-fix loop    -> unique closed-loop remediation on desktop");
-        System.out.println("  Ollama llama3.2:3b incident report   -> on-device explanation, zero cloud, advisory only");
+        System.out.println("  Packed LLM (qwen2.5-1.5b) report     -> on-device explanation, zero cloud, advisory only");
     }
 
     private void check(String name, boolean condition) {

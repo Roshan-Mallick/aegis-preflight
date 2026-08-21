@@ -24,3 +24,9 @@ aegis-preflight-app/resources/bin/trivy
 # JavaFX jmods fetched once by scripts/build-deb.sh to assemble the bundled
 # jlink runtime image (re-downloadable, pinned to pom javafx.version).
 tools/
+
+# Packed LLM engine + model (llama.cpp llama-server + GGUF weights, ~1.2 GB).
+# NOT stored in git — far beyond GitHub's per-file limits. build-deb.sh and
+# setup-offline.sh fetch pinned versions into this layout; the .deb release
+# asset ships them.
+aegis-preflight-app/resources/llm/

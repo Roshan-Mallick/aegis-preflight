@@ -31,7 +31,7 @@ import java.util.stream.Stream;
 public class MainLayout extends BorderPane {
 
     private static final int MAX_LOG_LINES = 500;
-    private static final String VERSION = "v0.1.1";
+    private static final String VERSION = "v0.1.2";
 
     private final TextField workspacePath;
     private final TextArea logOutput;
@@ -491,23 +491,24 @@ public class MainLayout extends BorderPane {
 
     /**
      * About dialog with the honest offline claim — "fully offline" is only
-     * true after the documented one-time setup (Semgrep rules, Trivy DB,
-     * Ollama model are pre-downloaded during installation).
+     * true after the documented one-time setup (Trivy DB + Docker base image;
+     * the LLM engine and model ship INSIDE the app).
      */
     private void showAboutDialog() {
         Alert about = new Alert(Alert.AlertType.INFORMATION);
         about.setTitle("About Aegis PreFlight");
         about.setHeaderText("Aegis PreFlight " + VERSION + " — Security for AI Coding");
         about.setContentText(
-            "Fully offline after one-time setup (Semgrep rules, Trivy vulnerability DB, "
-            + "Ollama model — all pre-downloaded during installation). "
+            "Fully offline after one-time setup (Trivy vulnerability DB and Docker base"
+            + " image are fetched once; the LLM engine AND model are packed inside the app). "
             + "No runtime internet connection required.\n\n"
             + "- Gate 1: Docker sandbox with --network=none, read-only rootfs\n"
             + "- Gate 2: Gitleaks + Semgrep (bundled rules) + Trivy (cached DB), all local\n"
             + "- Block-Fix-Rescan loop with deterministic scanner-based verdicts\n"
             + "- SHA-256 hash-chained audit log\n"
-            + "- Incident reports by on-device Ollama model (" + aegis.ai.LocalSecurityLLM.MODEL
-            + ") — advisory only, never the security decision-maker.");
+            + "- Incident reports by the PACKED on-device model ("
+            + aegis.ai.LocalSecurityLLM.MODEL + ") — advisory only, never the"
+            + " security decision-maker.");
         about.getDialogPane().setMinWidth(520);
         about.showAndWait();
     }

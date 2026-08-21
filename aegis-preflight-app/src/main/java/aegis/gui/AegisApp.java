@@ -1,9 +1,7 @@
 package aegis.gui;
 
-import aegis.ai.OllamaClient;
-import aegis.ai.OllamaManager;
+import aegis.ai.EmbeddedLLM;
 import javafx.application.Application;
-import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.image.Image;
 import javafx.stage.Stage;
@@ -15,46 +13,36 @@ public class AegisApp extends Application {
     private static final String APP_TITLE = "Aegis PreFlight \u2014 Security for AI Coding";
     private static final int MIN_WIDTH = 1200;
     private static final int MIN_HEIGHT = 720;
-    /** Single source of truth for the on-device model (verified via `ollama list`). */
-    private static final String DEFAULT_MODEL = aegis.ai.LocalSecurityLLM.MODEL;
-
-    private OllamaManager ollamaManager;
-    private OllamaClient ollamaClient;
 
     @Override
     public void start(Stage primaryStage) {
         long appStart = System.currentTimeMillis();
 
         Image icon = new Image(Objects.requireNonNull(
-            getClass().getResourceAsStream("/styles/applogo.png")));
+            getClass().getResourceAsStream("/styles/app-logo.png")));
         primaryStage.getIcons().add(icon);
 
-        ollamaManager = new OllamaManager();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("[Aegis] Shutdown hook: stopping Ollama...");
-            ollamaManager.stop();
-        }));
+        Runtime.getRuntime().addShutdownHook(new Thread(EmbeddedLLM.get()::stop));
 
-        Thread ollamaThread = new Thread(() -> {
-            try {
-                long start = System.currentTimeMillis();
-                ollamaManager.start();
-                ollamaManager.ensureModelReady(DEFAULT_MODEL);
-                ollamaClient = new OllamaClient(DEFAULT_MODEL);
-                // Pre-load model weights so the first Security Report fits its
-                // 5-second timeout budget (cold loads take ~10-20s).
+        // Auto-start the PACKED LLM engine (llama-server + bundled GGUF) in the
+        // background so the first Security Report is ready as early as possible.
+        // The UI never waits for it — the deterministic report shows instantly.
+        Thread llmThread = new Thread(() -> {
+            long start = System.currentTimeMillis();
+            boolean ok = EmbeddedLLM.get().ensureStarted();
+            if (ok) {
                 aegis.ai.LocalSecurityLLM.warmup();
-                long elapsed = System.currentTimeMillis() - start;
-                System.out.println("[Aegis] Ollama ready in " + elapsed + "ms (model: " + DEFAULT_MODEL + ")");
-            } catch (Exception e) {
-                System.err.println("[Aegis] Ollama startup failed: " + e.getMessage());
-                System.err.println("[Aegis] AI features will be unavailable. "
-                    + "To fix, run: ollama pull " + DEFAULT_MODEL);
-                ollamaClient = null;
+                System.out.println("[Aegis] embedded LLM ready in "
+                    + (System.currentTimeMillis() - start) + "ms (model: "
+                    + aegis.ai.LocalSecurityLLM.MODEL + ")");
+            } else {
+                System.err.println("[Aegis] embedded LLM unavailable (non-fatal): "
+                    + EmbeddedLLM.get().getLastError()
+                    + " — reports will use the deterministic structured fallback.");
             }
-        }, "ollama-init");
-        ollamaThread.setDaemon(true);
-        ollamaThread.start();
+        }, "embedded-llm-init");
+        llmThread.setDaemon(true);
+        llmThread.start();
 
         MainLayout mainLayout = new MainLayout();
 
@@ -66,8 +54,8 @@ public class AegisApp extends Application {
         primaryStage.setMinWidth(MIN_WIDTH);
         primaryStage.setMinHeight(MIN_HEIGHT);
         primaryStage.setOnCloseRequest(e -> {
-            System.out.println("[Aegis] Window closing, stopping Ollama...");
-            ollamaManager.stop();
+            System.out.println("[Aegis] Window closing, stopping embedded LLM...");
+            EmbeddedLLM.get().stop();
         });
         primaryStage.show();
 
@@ -77,18 +65,8 @@ public class AegisApp extends Application {
 
     @Override
     public void stop() {
-        System.out.println("[Aegis] JavaFX stop() called, stopping Ollama...");
-        if (ollamaManager != null) {
-            ollamaManager.stop();
-        }
-    }
-
-    public OllamaClient getOllamaClient() {
-        return ollamaClient;
-    }
-
-    public OllamaManager getOllamaManager() {
-        return ollamaManager;
+        System.out.println("[Aegis] JavaFX stop() called, stopping embedded LLM...");
+        EmbeddedLLM.get().stop();
     }
 
     public static void main(String[] args) {

@@ -16,7 +16,12 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * Local LLM incident reporter (Ollama, on-device) — ADVISORY ONLY.
+ * Local LLM incident reporter — runs ENTIRELY on-device, ADVISORY ONLY.
+ *
+ * The inference engine (llama.cpp llama-server) and the quantized model are
+ * PACKED INSIDE the application and started automatically by
+ * {@link EmbeddedLLM} on first use. No Ollama install, no model download,
+ * no network — the server binds to loopback only.
  *
  * Role per the original design doc, STRICTLY:
  *   1. Runtime behavioral analysis: consumes ActivityMonitor structured events
@@ -31,30 +36,36 @@ import java.util.List;
  * deterministic: scanner exit codes (Gitleaks/Semgrep/Trivy) + sandbox policy
  * violation flags, computed in VerdictEngine/RemediationLoop. This class has
  * NO write access to Finding.severity or Verdict — its only output is a
- * display String returned to the caller. If Ollama is down, slow, or the
- * model is missing, {@link #generateReportOffline} returns null and the UI
+ * display String returned to the caller. If the engine is down, slow, or the
+ * model fails to load, {@link #generateReportOffline} returns null and the UI
  * falls back to the deterministic structured report below; the pipeline is
  * never blocked or errored because of it.
  *
- * Fully offline: talks ONLY to localhost:11434. No other endpoint exists in
+ * Fully offline: talks ONLY to 127.0.0.1:<port>. No other endpoint exists in
  * this file, no DNS names, no proxies.
  */
 public final class LocalSecurityLLM {
 
     private static final Logger log = LoggerFactory.getLogger(LocalSecurityLLM.class);
 
-    /** Confirmed locally available via `ollama list` during one-time setup. */
-    public static final String MODEL = "llama3.2:3b";
+    /** Quantized instruct model shipped inside the package (resources/llm/models). */
+    public static final String MODEL = "qwen2.5-1.5b-instruct-q4_k_m";
 
-    /** Loopback-only API of the local Ollama server started by OllamaManager. */
-    public static final String API_URL = "http://localhost:11434/api/generate";
+    /** Loopback-only chat endpoint of the bundled llama-server. */
+    public static String apiUrl() {
+        String url = EmbeddedLLM.chatUrl();
+        if (url != null) {
+            return url;
+        }
+        return "http://127.0.0.1:" + EmbeddedLLM.BASE_PORT + "/v1/chat/completions";
+    }
 
     /**
      * Per-attempt HTTP cap, overridable via -Daegis.llm.timeout-secs. Sized for
-     * COLD STARTS: right after boot Ollama loads model weights into RAM before
-     * the first token appears, which routinely exceeds 10s. All calls run on
-     * BACKGROUND threads only — the UI always shows the instant deterministic
-     * fallback and is never blocked by this value.
+     * COLD STARTS: right after boot the engine loads model weights into RAM
+     * before the first token appears. All calls run on BACKGROUND threads
+     * only — the UI always shows the instant deterministic fallback and is
+     * never blocked by this value.
      */
     public static final int TIMEOUT_SECONDS =
         Integer.getInteger("aegis.llm.timeout-secs", 25);
@@ -77,7 +88,8 @@ public final class LocalSecurityLLM {
     private static final Gson gson = new Gson();
 
     /**
-     * Ollama runs ONE model instance — concurrent generate requests serialize
+     * The embedded engine serves ONE model instance — concurrent generate
+     * requests serialize inside the server and starve each other's client-side
      * inside the server and starve each other's client-side timeouts. All
      * callers therefore queue here, so a single 5s attempt is spent on real
      * generation instead of waiting behind other requests.
@@ -102,8 +114,8 @@ public final class LocalSecurityLLM {
     }
 
     /**
-     * Cold-start-aware variant. On a freshly booted machine Ollama needs
-     * tens of seconds to load model weights BEFORE it can answer.
+     * Cold-start-aware variant. On a freshly started machine the embedded
+     * engine needs seconds to load model weights BEFORE it can answer.
      *
      * Each HTTP attempt is capped at {@link #TIMEOUT_SECONDS}; retries happen
      * on the CALLER's background thread only, at most {@link #MAX_ATTEMPTS}
@@ -120,6 +132,10 @@ public final class LocalSecurityLLM {
         if (evidence.equals(lastEvidenceJson) && lastReportText != null) {
             return lastReportText;
         }
+        // Auto-start the PACKED engine (no-op when already healthy). Never
+        // fatal: failures simply fall through to the bounded retry loop and
+        // eventually to the deterministic fallback.
+        EmbeddedLLM.get().ensureStarted();
         long deadline = System.currentTimeMillis() + Math.max(0, totalBudgetMillis);
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
@@ -193,7 +209,7 @@ public final class LocalSecurityLLM {
     }
 
     /**
-     * Loads the model into the Ollama runtime ahead of the first real report
+     * Loads the model into the embedded engine ahead of the first real report
      * so generation succeeds on the first background attempt. Fire-and-forget:
      * any failure is logged and ignored (the report path falls back gracefully).
      * Deliberately does NOT touch the report dedupe cache and uses the same
@@ -201,6 +217,10 @@ public final class LocalSecurityLLM {
      * loading here instead of failing silently.
      */
     public static void warmup() {
+        if (!EmbeddedLLM.get().ensureStarted()) {
+            log.warn("LocalSecurityLLM warmup skipped — embedded engine unavailable (non-fatal)");
+            return;
+        }
         long deadline = System.currentTimeMillis() + 90_000;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
@@ -272,16 +292,25 @@ public final class LocalSecurityLLM {
 
     // --- loopback HTTP ---
 
+    /**
+     * POSTs the prompt to the PACKED llama-server's OpenAI-compatible chat
+     * endpoint (loopback only) and returns the generated text, or null.
+     */
     private static String postGenerate(String prompt) throws Exception {
         JsonObject requestBody = new JsonObject();
-        requestBody.addProperty("model", MODEL);
-        requestBody.addProperty("prompt", prompt);
+        JsonArray messages = new JsonArray();
+        JsonObject userMessage = new JsonObject();
+        userMessage.addProperty("role", "user");
+        userMessage.addProperty("content", prompt);
+        messages.add(userMessage);
+        requestBody.add("messages", messages);
         requestBody.addProperty("stream", false);
-        requestBody.add("options", gson.fromJson(
-            "{\"temperature\":0,\"num_predict\":220}", JsonObject.class));
+        requestBody.addProperty("temperature", 0);
+        requestBody.addProperty("max_tokens", 220);
+        requestBody.addProperty("cache_prompt", true);
 
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(API_URL))
+            .uri(URI.create(apiUrl()))
             .timeout(Duration.ofSeconds(TIMEOUT_SECONDS))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(requestBody)))
@@ -294,12 +323,17 @@ public final class LocalSecurityLLM {
         }
 
         if (response.statusCode() != 200) {
-            log.warn("Ollama responded HTTP {}", response.statusCode());
+            log.warn("Embedded LLM responded HTTP {}", response.statusCode());
             return null;
         }
         JsonObject body = gson.fromJson(response.body(), JsonObject.class);
-        return body.has("response") && !body.get("response").isJsonNull()
-            ? body.get("response").getAsString()
+        if (!body.has("choices") || body.getAsJsonArray("choices").size() == 0) {
+            return null;
+        }
+        JsonObject message = body.getAsJsonArray("choices").get(0)
+            .getAsJsonObject().getAsJsonObject("message");
+        return message != null && message.has("content") && !message.get("content").isJsonNull()
+            ? message.get("content").getAsString()
             : null;
     }
 
