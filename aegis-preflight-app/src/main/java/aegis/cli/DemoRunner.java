@@ -160,8 +160,10 @@ public class DemoRunner {
 
             // ---------- STEP 5: local LLM incident report (advisory only) ----------
             banner("STEP 5 — LOCAL LLM (OLLAMA): offline incident report (ADVISORY ONLY)");
+            // Cold-start-aware: bounded retries while the model loads. Falls
+            // back to null (structured report) if the budget is exhausted.
             String llmReport = aegis.ai.LocalSecurityLLM.generateReportOffline(
-                lastRoundFindings(result), sandboxEvents(flagged));
+                lastRoundFindings(result), sandboxEvents(flagged), 120_000);
             boolean llmOk = llmReport != null && !llmReport.isBlank() && !llmReport.startsWith("{");
             check("local LLM produced a human-readable incident report (localhost:11434)", llmOk);
             if (llmOk) {

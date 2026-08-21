@@ -31,9 +31,10 @@ import java.util.List;
  * deterministic: scanner exit codes (Gitleaks/Semgrep/Trivy) + sandbox policy
  * violation flags, computed in VerdictEngine/RemediationLoop. This class has
  * NO write access to Finding.severity or Verdict — its only output is a
- * display String returned to the caller. If Ollama is down, slow (>5s), or
- * the model is missing, {@link #generateReportOffline} returns null and the
- * UI falls back to raw structured findings; the pipeline is never blocked.
+ * display String returned to the caller. If Ollama is down, slow, or the
+ * model is missing, {@link #generateReportOffline} returns null and the UI
+ * falls back to the deterministic structured report below; the pipeline is
+ * never blocked or errored because of it.
  *
  * Fully offline: talks ONLY to localhost:11434. No other endpoint exists in
  * this file, no DNS names, no proxies.
@@ -48,8 +49,21 @@ public final class LocalSecurityLLM {
     /** Loopback-only API of the local Ollama server started by OllamaManager. */
     public static final String API_URL = "http://localhost:11434/api/generate";
 
-    /** Per design doc: must never block the pipeline longer than this. */
-    public static final int TIMEOUT_SECONDS = 5;
+    /**
+     * Per-attempt HTTP cap, overridable via -Daegis.llm.timeout-secs. Sized for
+     * COLD STARTS: right after boot Ollama loads model weights into RAM before
+     * the first token appears, which routinely exceeds 10s. All calls run on
+     * BACKGROUND threads only — the UI always shows the instant deterministic
+     * fallback and is never blocked by this value.
+     */
+    public static final int TIMEOUT_SECONDS =
+        Integer.getInteger("aegis.llm.timeout-secs", 25);
+
+    /** Bounded retry budget for the cold-start window (a few attempts, not forever). */
+    public static final int MAX_ATTEMPTS = 5;
+
+    /** Progressive backoff between cold-start attempts (ms). */
+    private static final long[] BACKOFF_MILLIS = {3_000, 8_000, 15_000, 25_000};
 
     /**
      * Deterministic prompt template — instructs the model to explain the
@@ -89,14 +103,15 @@ public final class LocalSecurityLLM {
 
     /**
      * Cold-start-aware variant. On a freshly booted machine Ollama needs
-     * tens of seconds to load model weights BEFORE it can answer, so a single
-     * 5-second attempt would always fall back on first run.
+     * tens of seconds to load model weights BEFORE it can answer.
      *
-     * Each HTTP attempt is still strictly capped at {@link #TIMEOUT_SECONDS}
-     * (the UI is never blocked longer than one attempt — retries happen on a
-     * background thread only). Within {@code totalBudgetMillis} the method
-     * re-attempts every few seconds until the model is warm and a real
-     * narrative comes back. Returns null if the budget is exhausted.
+     * Each HTTP attempt is capped at {@link #TIMEOUT_SECONDS}; retries happen
+     * on the CALLER's background thread only, at most {@link #MAX_ATTEMPTS}
+     * times and never past {@code totalBudgetMillis}. Progressive backoff
+     * leaves the server free while weights load. Returns null if attempts or
+     * budget are exhausted — callers then keep their structured fallback
+     * permanently for the session (silently; the fallback is a complete,
+     * correct report on its own).
      */
     public static String generateReportOffline(List<Finding> findings,
                                                List<ActivityEvent> sandboxEvents,
@@ -106,9 +121,7 @@ public final class LocalSecurityLLM {
             return lastReportText;
         }
         long deadline = System.currentTimeMillis() + Math.max(0, totalBudgetMillis);
-        int attempt = 0;
-        do {
-            attempt++;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 String prompt = String.format(PROMPT_TEMPLATE, evidence);
                 String response = postGenerate(prompt);
@@ -124,35 +137,43 @@ public final class LocalSecurityLLM {
                     return response.strip();
                 }
                 log.warn("LocalSecurityLLM: empty response on attempt {}", attempt);
-                return null; // server up but useless — do not spin
+                return null; // server up but returned nothing useful — do not spin
             } catch (java.net.http.HttpTimeoutException e) {
-                log.warn("LocalSecurityLLM attempt {} timed out after {}s", attempt, TIMEOUT_SECONDS);
-                if (System.currentTimeMillis() >= deadline) {
-                    return null;
-                }
-                try {
-                    Thread.sleep(5000); // leave the runner free while weights load
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return null;
-                }
+                // Most common cold-start signal: request aborted while weights load.
+                log.warn("LocalSecurityLLM attempt {}/{} timed out after {}s",
+                    attempt, MAX_ATTEMPTS, TIMEOUT_SECONDS);
             } catch (Exception e) {
-                log.warn("LocalSecurityLLM unavailable ({}): {}",
-                    e.getClass().getSimpleName(), e.getMessage());
+                // Connection refused/reset etc. — the server may itself still
+                // be starting up; stay inside the same bounded retry budget.
+                log.warn("LocalSecurityLLM unavailable on attempt {}/{} ({}): {}", attempt,
+                    MAX_ATTEMPTS, e.getClass().getSimpleName(), e.getMessage());
+            }
+            if (attempt == MAX_ATTEMPTS || System.currentTimeMillis() >= deadline) {
+                break;
+            }
+            long sleepMs = BACKOFF_MILLIS[Math.min(attempt - 1, BACKOFF_MILLIS.length - 1)];
+            try {
+                Thread.sleep(sleepMs); // background only — UI stays responsive
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
                 return null;
             }
-        } while (System.currentTimeMillis() < deadline);
+        }
+        log.warn("LocalSecurityLLM: cold-start budget exhausted after {} attempt(s); "
+            + "structured fallback remains the final report for this session", MAX_ATTEMPTS);
         return null;
     }
 
     /**
-     * Deterministic fallback text used when the LLM times out or is absent —
-     * renders the same structured findings without any generation.
+     * Deterministic structured report used instantly on scan completion and
+     * kept as the final state if the LLM never answers — built purely from
+     * scanner output (tool/rule, file, line, severity, plain-language fix),
+     * so it is a complete and correct report on its own.
      */
     public static String structuredFallback(List<Finding> findings,
                                             List<ActivityEvent> sandboxEvents) {
         StringBuilder sb = new StringBuilder();
-        sb.append("On-device report generator unavailable — showing raw structured findings.\n\n");
+        sb.append("Structured report (deterministic — generated locally, no LLM needed):\n\n");
         long flagged = sandboxEvents == null ? 0
             : sandboxEvents.stream().filter(ActivityEvent::flagged).count();
         sb.append("Sandbox policy violations: ").append(flagged).append('\n');
@@ -173,16 +194,38 @@ public final class LocalSecurityLLM {
 
     /**
      * Loads the model into the Ollama runtime ahead of the first real report
-     * so generation fits inside the 5-second budget. Fire-and-forget: any
-     * failure is logged and ignored (the report path falls back gracefully).
+     * so generation succeeds on the first background attempt. Fire-and-forget:
+     * any failure is logged and ignored (the report path falls back gracefully).
+     * Deliberately does NOT touch the report dedupe cache and uses the same
+     * bounded retry pattern as reports, so a genuinely cold model finishes
+     * loading here instead of failing silently.
      */
     public static void warmup() {
-        try {
-            postGenerate("Reply with the single word OK. Evidence: {}");
-            log.info("LocalSecurityLLM: model '{}' warmed and resident", MODEL);
-        } catch (Exception e) {
-            log.warn("LocalSecurityLLM warmup failed (non-fatal): {}", e.getMessage());
+        long deadline = System.currentTimeMillis() + 90_000;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                postGenerate("Reply with the single word OK.");
+                log.info("LocalSecurityLLM: model '{}' warmed and resident (attempt {})", MODEL, attempt);
+                return;
+            } catch (java.net.http.HttpTimeoutException e) {
+                log.warn("LocalSecurityLLM warmup attempt {}/{} timed out ({}s) — weights still loading",
+                    attempt, MAX_ATTEMPTS, TIMEOUT_SECONDS);
+            } catch (Exception e) {
+                log.warn("LocalSecurityLLM warmup failed (non-fatal): {}", e.getMessage());
+                return;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                break;
+            }
+            try {
+                Thread.sleep(BACKOFF_MILLIS[Math.min(attempt - 1, BACKOFF_MILLIS.length - 1)]);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
+        log.warn("LocalSecurityLLM warmup did not complete (non-fatal); "
+            + "report path will retry within its own budget");
     }
 
     // --- evidence assembly (deterministic, structured) ---

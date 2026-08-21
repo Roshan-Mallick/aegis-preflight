@@ -20,9 +20,10 @@ import java.util.stream.Stream;
 /**
  * Wraps Semgrep as an external host subprocess — fully offline:
  *
- *   semgrep --config=&lt;resources&gt;/semgrep-rules/python
+ *   semgrep --json --quiet --no-git-ignore
+ *           --config=&lt;resources&gt;/semgrep-rules/python
  *           --config=&lt;resources&gt;/semgrep-rules/javascript
- *           --json &lt;workspace&gt;
+ *           &lt;workspace&gt;
  *
  * Rules are the bundled semgrep-rules snapshot shipped with the app
  * (resources/semgrep-rules, pinned upstream commit recorded in
@@ -74,6 +75,13 @@ public class SemgrepScanner {
         cmd.add(binary.get().toString());
         cmd.add("--json");
         cmd.add("--quiet");
+        // A security gate must never inherit ignore rules from whatever repo
+        // happens to enclose the workspace (e.g. CI checkouts where the
+        // scanned dir is git-ignored) — always scan every target file.
+        cmd.add("--no-git-ignore");
+        // Zero telemetry: semgrep would otherwise POST usage metrics to
+        // semgrep.dev. Bundled rules only, no registry, no metrics.
+        cmd.add("--metrics=off");
         cmd.addAll(configs);
         cmd.add(workspace.toString());
 
@@ -162,6 +170,13 @@ public class SemgrepScanner {
 
     private Finding parseFinding(JsonObject obj) {
         String checkId = stringOr(obj, "check_id", "unknown");
+        // semgrep prefixes rule IDs with the config path it was given
+        // (…/resources/semgrep-rules.python.lang.security.foo) — strip the
+        // filesystem noise so the UI shows the canonical rule ID.
+        int prefixIdx = checkId.indexOf(".semgrep-rules.");
+        if (prefixIdx >= 0) {
+            checkId = checkId.substring(prefixIdx + ".semgrep-rules.".length());
+        }
         String path = stringOr(obj, "path", "");
         int line = 0;
         if (obj.has("start") && obj.getAsJsonObject("start").has("line")) {

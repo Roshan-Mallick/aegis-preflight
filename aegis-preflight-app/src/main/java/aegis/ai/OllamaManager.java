@@ -24,6 +24,7 @@ public class OllamaManager {
     private static final int STOP_TIMEOUT_SECONDS = 5;
 
     private Process ollamaProcess;
+    private boolean adoptedExternalServer;
     private final HttpClient httpClient;
 
     public OllamaManager() {
@@ -35,6 +36,15 @@ public class OllamaManager {
     public synchronized void start() throws AiException {
         if (ollamaProcess != null && ollamaProcess.isAlive()) {
             log.info("Ollama server already running (pid={})", ollamaProcess.pid());
+            return;
+        }
+
+        // A server may already be listening on loopback (systemd service,
+        // previous session, manual start). Adopt it instead of failing on
+        // the port conflict — it serves the exact same local-only API.
+        if (isServerResponding()) {
+            adoptedExternalServer = true;
+            log.info("Ollama already listening on {} — adopting existing server", OLLAMA_HOST);
             return;
         }
 
@@ -78,6 +88,10 @@ public class OllamaManager {
     }
 
     public synchronized void stop() {
+        if (adoptedExternalServer) {
+            log.info("Using externally managed Ollama server — leaving it running");
+            return;
+        }
         if (ollamaProcess == null) {
             log.info("No Ollama process to stop");
             return;
@@ -209,29 +223,32 @@ public class OllamaManager {
     }
 
     public boolean isRunning() {
-        return ollamaProcess != null && ollamaProcess.isAlive();
+        return adoptedExternalServer || (ollamaProcess != null && ollamaProcess.isAlive());
+    }
+
+    /** True if something is already serving the Ollama API on loopback. */
+    private boolean isServerResponding() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(OLLAMA_HOST + "/api/version"))
+                .timeout(Duration.ofSeconds(2))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofString());
+            return response.statusCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void waitForServer() throws AiException {
         long deadline = System.currentTimeMillis() + (STARTUP_TIMEOUT_SECONDS * 1000L);
 
         while (System.currentTimeMillis() < deadline) {
-            try {
-                HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(OLLAMA_HOST + "/"))
-                    .timeout(Duration.ofSeconds(2))
-                    .GET()
-                    .build();
-
-                HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
-
-                if (response.statusCode() == 200) {
-                    log.debug("Ollama API responded (HTTP {})", response.statusCode());
-                    return;
-                }
-            } catch (Exception e) {
-                log.debug("Waiting for Ollama... {}", e.getMessage());
+            if (isServerResponding()) {
+                log.debug("Ollama API responded");
+                return;
             }
 
             try {

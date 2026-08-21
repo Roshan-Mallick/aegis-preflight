@@ -20,3 +20,7 @@ GUIDE/
 # It is NOT stored in git; it ships inside the .deb release asset and can be
 # re-fetched any time via scripts/setup-offline.sh (one-time, documented).
 aegis-preflight-app/resources/bin/trivy
+
+# JavaFX jmods fetched once by scripts/build-deb.sh to assemble the bundled
+# jlink runtime image (re-downloadable, pinned to pom javafx.version).
+tools/

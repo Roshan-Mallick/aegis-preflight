@@ -117,6 +117,10 @@ public final class ExternalToolResolver {
             pb.directory(workingDir.toFile());
         }
         pb.redirectErrorStream(false);
+        // Offline guarantee for scanner subprocesses: semgrep must never send
+        // metrics or phone home for version checks, regardless of flags.
+        pb.environment().putIfAbsent("SEMGREP_SEND_METRICS", "off");
+        pb.environment().putIfAbsent("SEMGREP_ENABLE_VERSION_CHECK", "0");
 
         Process process = pb.start();
 

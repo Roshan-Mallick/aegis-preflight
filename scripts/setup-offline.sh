@@ -3,14 +3,19 @@
 # Aegis PreFlight — ONE-TIME offline setup.
 #
 # Everything here is a documented FIRST-RUN step. After it completes, the app
-# requires NO network access at runtime.
+# requires NO network access at runtime (loopback to the local Ollama server
+# only — verified at the syscall level, see README "Offline proof").
 #   1. Semgrep (host tool)            — pip install if missing
 #   2. Semgrep rules                  — already bundled in resources/semgrep-rules
-#   3. Trivy binary                   — download into resources/bin if missing
+#   3. Trivy binary                   — bundled in the .deb; downloaded into
+#                                       resources/bin only for source builds
 #   4. Trivy vulnerability DB         — trivy fs --download-db-only (once)
 #   5. Gitleaks                       — verify the bundled binary works
 #   6. Ollama + llama3.2:3b           — verify model is present, pull once if not
 #   7. Docker base image              — docker pull ubuntu:22.04 (once)
+#
+# The Java runtime + JavaFX modules ship inside the .deb (jlink image), so no
+# JDK/OpenJFX installation is needed on the target machine.
 # ============================================================================
 set -euo pipefail
 
@@ -107,7 +112,7 @@ cat <<'EOF'
 
 ============================================================
  One-time setup COMPLETE. The app is now fully offline:
- runtime makes zero internet connections (loopback to the
- local Ollama server only).
+ runtime makes zero non-loopback connections (loopback to
+ the local Ollama server only).
 ============================================================
 EOF
