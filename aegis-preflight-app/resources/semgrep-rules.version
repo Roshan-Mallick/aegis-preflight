@@ -1,0 +1,4 @@
+Upstream: https://github.com/semgrep/semgrep-rules @ 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
+Pruned before shipping/pushing:
+  - generic/secrets/  (detector test fixtures containing sample API keys —
+    tripped GitHub push protection; secret detection is handled by Gitleaks)

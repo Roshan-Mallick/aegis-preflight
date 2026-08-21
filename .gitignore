@@ -1,0 +1,22 @@
+# build artifacts
+aegis-preflight-app/target/
+dist/
+dependency-reduced-pom.xml
+
+# runtime state
+demo/runs/
+*.db
+*.db-journal
+nohup.out
+
+# IDE / local junk
+.idea/
+untitled/
+javac.*.args
+context-*.txt
+GUIDE/
+
+# Trivy binary is 168 MB — exceeds GitHub's 100 MiB per-file hard limit.
+# It is NOT stored in git; it ships inside the .deb release asset and can be
+# re-fetched any time via scripts/setup-offline.sh (one-time, documented).
+aegis-preflight-app/resources/bin/trivy
