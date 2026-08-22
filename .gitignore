@@ -30,3 +30,6 @@ tools/
 # setup-offline.sh fetch pinned versions into this layout; the .deb release
 # asset ships them.
 aegis-preflight-app/resources/llm/
+
+# stray root-level duplicate of the packaged app icon
+/logo.png

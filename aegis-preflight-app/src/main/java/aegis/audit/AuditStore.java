@@ -37,6 +37,10 @@ public class AuditStore implements AutoCloseable {
             try (Statement st = connection.createStatement()) {
                 st.execute("PRAGMA journal_mode=WAL");
                 st.execute("PRAGMA synchronous=FULL");
+                // Multiple processes may legitimately run Aegis instances
+                // sharing one audit DB; give contending writers time to
+                // acquire the write lock instead of failing fast.
+                st.execute("PRAGMA busy_timeout=10000");
             }
             initializeSchema();
         } catch (SQLException e) {
@@ -174,6 +178,12 @@ public class AuditStore implements AutoCloseable {
     /**
      * Appends an event to the chain and returns the persisted row
      * (with id, prev_hash and curr_hash populated).
+     *
+     * The head-read + insert run inside a BEGIN IMMEDIATE transaction, so the
+     * SQLite write lock is held across BOTH steps. This serializes appenders
+     * ACROSS PROCESSES too (the in-JVM chainLock alone cannot — two Aegis
+     * instances sharing one audit DB would otherwise read the same head and
+     * fork the chain). Busy contention is retried with a small backoff.
      */
     public AuditEvent writeEvent(AuditEvent event) throws AuditException {
         synchronized (chainLock) {
@@ -181,36 +191,87 @@ public class AuditStore implements AutoCloseable {
             String eventType = event.eventType().name();
             String payloadJson = event.payloadJson();
 
-            try {
-                String prevHash;
-                try (Statement st = connection.createStatement();
-                     ResultSet rs = st.executeQuery("SELECT curr_hash FROM audit_events ORDER BY id DESC LIMIT 1")) {
-                    prevHash = rs.next() ? rs.getString(1) : HashChain.GENESIS_HASH;
+            SQLException lastFailure = null;
+            for (int attempt = 0; attempt < 25; attempt++) {
+                boolean beganTxn = false;
+                try (Statement txn = connection.createStatement()) {
+                    txn.execute("BEGIN IMMEDIATE");
+                    beganTxn = true;
+
+                    String prevHash;
+                    try (Statement st = connection.createStatement();
+                         ResultSet rs = st.executeQuery(
+                             "SELECT curr_hash FROM audit_events ORDER BY id DESC LIMIT 1")) {
+                        prevHash = rs.next() ? rs.getString(1) : HashChain.GENESIS_HASH;
+                    }
+
+                    String currHash =
+                        HashChain.computeHash(prevHash, timestamp, eventType, payloadJson);
+
+                    PreparedStatement stmt = connection.prepareStatement("""
+                        INSERT INTO audit_events (timestamp, event_type, payload_json,
+                                                  prev_hash, curr_hash)
+                        VALUES (?, ?, ?, ?, ?)
+                        """);
+                    stmt.setString(1, timestamp);
+                    stmt.setString(2, eventType);
+                    stmt.setString(3, payloadJson);
+                    stmt.setString(4, prevHash);
+                    stmt.setString(5, currHash);
+                    stmt.executeUpdate();
+
+                    long id;
+                    try (Statement st = connection.createStatement();
+                         ResultSet rs = st.executeQuery("SELECT last_insert_rowid()")) {
+                        id = rs.next() ? rs.getLong(1) : -1;
+                    }
+
+                    txn.execute("COMMIT");
+                    return new AuditEvent(id, event.timestamp(), event.eventType(),
+                        payloadJson, prevHash, currHash);
+                } catch (SQLException e) {
+                    lastFailure = e;
+                    if (beganTxn) {
+                        try (Statement rollback = connection.createStatement()) {
+                            rollback.execute("ROLLBACK");
+                        } catch (SQLException ignored) {
+                        }
+                    }
+                    // busy/locked -> brief backoff and re-read the fresh head
+                    if (!isBusy(e)) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(20L * (attempt + 1));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
-
-                String currHash = HashChain.computeHash(prevHash, timestamp, eventType, payloadJson);
-
-                PreparedStatement stmt = connection.prepareStatement("""
-                    INSERT INTO audit_events (timestamp, event_type, payload_json, prev_hash, curr_hash)
-                    VALUES (?, ?, ?, ?, ?)
-                    """);
-                stmt.setString(1, timestamp);
-                stmt.setString(2, eventType);
-                stmt.setString(3, payloadJson);
-                stmt.setString(4, prevHash);
-                stmt.setString(5, currHash);
-                stmt.executeUpdate();
-
-                long id;
-                try (Statement st = connection.createStatement();
-                     ResultSet rs = st.executeQuery("SELECT last_insert_rowid()")) {
-                    id = rs.next() ? rs.getLong(1) : -1;
-                }
-
-                return new AuditEvent(id, event.timestamp(), event.eventType(), payloadJson, prevHash, currHash);
-            } catch (SQLException e) {
-                throw new AuditException("Failed to write chained audit event", e);
             }
+            throw new AuditException(
+                "Failed to write chained audit event"
+                    + (lastFailure == null ? "" : ": " + lastFailure.getMessage()),
+                lastFailure);
+        }
+    }
+
+    private static boolean isBusy(SQLException e) {
+        String msg = String.valueOf(e.getMessage()).toLowerCase();
+        return msg.contains("busy") || msg.contains("locked")
+            || msg.contains("snapshot");
+    }
+
+    /**
+     * Recomputes prev_hash/curr_hash for every stored row in id order.
+     *
+     * Tamper-evident logs must never repair silently: this exists ONLY as an
+     * explicit operator action for known-benign damage such as a pre-fix
+     * multi-process fork. Verification itself never mutates rows.
+     */
+    public void repairChain() throws AuditException {
+        synchronized (chainLock) {
+            rebuildChain();
         }
     }
 

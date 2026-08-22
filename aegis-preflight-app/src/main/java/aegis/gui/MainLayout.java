@@ -31,7 +31,7 @@ import java.util.stream.Stream;
 public class MainLayout extends BorderPane {
 
     private static final int MAX_LOG_LINES = 500;
-    private static final String VERSION = "v0.1.2";
+    private static final String VERSION = "v0.1.4";
 
     private final TextField workspacePath;
     private final TextArea logOutput;
@@ -48,7 +48,18 @@ public class MainLayout extends BorderPane {
     private final CheckBox depsCheck;
     private final CheckBox configCheck;
 
+    /** Center host: PreFlight Scan view + one guarded-terminal tab per sandbox. */
+    private final TabPane centerTabs;
+    /** SECURITY APPROVAL REQUIRED card (overlay, visible only while pending). */
+    private final TitledPane approvalCard;
+    private final VBox approvalRows;
+
     private List<Finding> lastFindings = new ArrayList<>();
+
+    /** Lazy-initialized guarded-terminal infrastructure (null on failure). */
+    private aegis.audit.AuditLogger sessionAudit;
+    private aegis.session.SessionManager sessionManager;
+    private boolean sessionsFailed;
 
     private static final Set<String> SENSITIVE_EXTENSIONS = Set.of(
         ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"
@@ -116,6 +127,11 @@ public class MainLayout extends BorderPane {
         aboutBtn.getStyleClass().add("browse-btn");
         aboutBtn.setOnAction(e -> showAboutDialog());
 
+        Button newSessionBtn = new Button("+ New Agent Session");
+        newSessionBtn.setMaxWidth(Double.MAX_VALUE);
+        newSessionBtn.getStyleClass().add("scan-button");
+        newSessionBtn.setOnAction(e -> openAgentSession());
+
         Region spacer = new Region();
         VBox.setVgrow(spacer, Priority.ALWAYS);
 
@@ -124,6 +140,7 @@ public class MainLayout extends BorderPane {
             new Separator(),
             label("Workspace Directory", true), workspaceRow,
             spacer,
+            label("Agent Terminal", true), newSessionBtn,
             label("Scan Controls", true), scanButton, progressBar,
             secretsCheck, depsCheck, configCheck,
             new Separator(),
@@ -142,9 +159,8 @@ public class MainLayout extends BorderPane {
         logOutput.setWrapText(true);
         logOutput.setFont(Font.font("Monospaced", 12));
         logOutput.getStyleClass().add("log-output");
-        // Fixed-size activity log; ALL remaining vertical space goes to the
-        // bottom SplitPane (single ALWAYS-grown child).
-        logOutput.setPrefRowCount(9);
+        // Resizable via the main vertical splitter — never smaller than this.
+        logOutput.setMinHeight(120);
 
         findingsPanel = new VBox(4);
         findingsPanel.setPadding(new Insets(8));
@@ -173,6 +189,9 @@ public class MainLayout extends BorderPane {
         bottomSplit.setOrientation(Orientation.HORIZONTAL);
         bottomSplit.setDividerPositions(0.55);
         bottomSplit.setMaxHeight(Double.MAX_VALUE);
+        // Floor for the whole bottom row so the top Scan Results panel can
+        // never starve it while the user drags the main splitter.
+        bottomSplit.setMinHeight(170);
 
         findingsPane.setMaxWidth(Double.MAX_VALUE);
         findingsPane.setMaxHeight(Double.MAX_VALUE);
@@ -189,9 +208,73 @@ public class MainLayout extends BorderPane {
         Label header = new Label("Scan Results");
         header.setFont(Font.font("System", FontWeight.BOLD, 16));
 
-        VBox center = new VBox(8, header, logOutput, bottomSplit);
-        center.setPadding(new Insets(15));
-        setCenter(center);
+        // Scan Results card: title + terminal output. Lives inside the TOP
+        // pane of the main vertical splitter, so dragging the splitter
+        // resizes the whole black output area up and down.
+        VBox scanResultsPanel = new VBox(8, header, logOutput);
+        VBox.setVgrow(logOutput, Priority.ALWAYS);
+        scanResultsPanel.setMinHeight(150);
+
+        // Main content: ONE vertical SplitPane — Scan Results (top) vs the
+        // Detailed Findings / Security Report row (bottom). The bottom section
+        // always fills the remaining height; the divider position governs the
+        // top panel size (no hardcoded pixel heights anywhere).
+        SplitPane mainSplit = new SplitPane(scanResultsPanel, bottomSplit);
+        mainSplit.setOrientation(Orientation.VERTICAL);
+        mainSplit.setDividerPositions(0.40);
+        mainSplit.getStyleClass().add("main-split");
+        mainSplit.setMaxHeight(Double.MAX_VALUE);
+
+        VBox scanView = new VBox(mainSplit);
+        VBox.setVgrow(mainSplit, Priority.ALWAYS);
+        scanView.setPadding(new Insets(15));
+
+        // Center is now a TabPane: the PreFlight Scan view plus one guarded-
+        // terminal tab per agent session (each tab = its own sandbox container).
+        Tab scanTab = new Tab("PreFlight Scan", scanView);
+        scanTab.setClosable(false);
+        centerTabs = new TabPane(scanTab);
+        centerTabs.setMaxHeight(Double.MAX_VALUE);
+        VBox.setVgrow(centerTabs, Priority.ALWAYS);
+
+        // Tab removal MUST tear down its sandbox container + docker-events
+        // tailer. JavaFX 17 quirk: programmatic getTabs().remove() does NOT
+        // fire Tab.onClosed (that path is driven by the skin's close button),
+        // so observe the list directly — covers BOTH user-click and code
+        // removals. SessionManager.closeSession is idempotent, so the
+        // TerminalTab.onClosed handler firing additionally is harmless.
+        centerTabs.getTabs().addListener(
+            (javafx.collections.ListChangeListener<Tab>) change -> {
+                while (change.next()) {
+                    for (Tab removed : change.getRemoved()) {
+                        if (removed instanceof TerminalTab terminalTab) {
+                            terminalTab.teardownSession();
+                        }
+                    }
+                }
+            });
+
+        // SECURITY APPROVAL REQUIRED card — an overlay pinned top-right that
+        // only exists visually while commands are held for human review.
+        approvalRows = new VBox(6);
+        approvalRows.setPadding(new Insets(8));
+        Label approvalTitle = new Label("SECURITY APPROVAL REQUIRED");
+        approvalTitle.setFont(Font.font("System", FontWeight.BOLD, 13));
+        approvalTitle.setTextFill(Color.RED);
+        approvalCard = new TitledPane(approvalTitle.getText(), approvalRows);
+        if (approvalCard.getGraphic() instanceof Label graphic) {
+            graphic.setFont(Font.font("System", FontWeight.BOLD, 13));
+            graphic.setTextFill(Color.RED);
+        }
+        approvalCard.getStyleClass().add("approval-card");
+        approvalCard.setMaxWidth(480);
+        approvalCard.setVisible(false);
+        approvalCard.setManaged(false);
+
+        StackPane centerStack = new StackPane(centerTabs, approvalCard);
+        StackPane.setAlignment(approvalCard, Pos.TOP_RIGHT);
+        StackPane.setMargin(approvalCard, new Insets(12));
+        setCenter(centerStack);
 
         if (Boolean.getBoolean("aegis.autoscan")) {
             Thread t = new Thread(() -> {
@@ -206,6 +289,144 @@ public class MainLayout extends BorderPane {
         }
 
         startUiTestDriverIfRequested();
+
+        if (Boolean.getBoolean("aegis.selftest")) {
+            aegis.gui.SelfTestDriver.launch(this);
+        }
+    }
+
+    /* -------------------- guarded terminal / approvals -------------------- */
+
+    /** Lazily creates audit + SessionManager (shared by all session tabs). */
+    private void ensureSessions() throws Exception {
+        if (sessionManager != null) {
+            return;
+        }
+        if (sessionsFailed) {
+            throw new IllegalStateException("Session infrastructure failed earlier");
+        }
+        try {
+            Path db = Paths.get(System.getProperty("user.home"), ".aegis", "audit.db");
+            Files.createDirectories(db.getParent());
+            sessionAudit = new aegis.audit.AuditLogger(db.toString());
+            sessionManager = new aegis.session.SessionManager(sessionAudit,
+                null, this::onApprovalsChanged);
+            Runtime.getRuntime().addShutdownHook(
+                new Thread(sessionManager::close, "session-cleanup"));
+        } catch (Exception e) {
+            sessionsFailed = true;
+            throw e;
+        }
+    }
+
+    /**
+     * Opens one guarded-terminal tab backed by its OWN sandbox container.
+     * Package-private so the self-test driver can drive it directly.
+     *
+     * @param overrideWs explicit workspace (self-test); null = use path field
+     */
+    TerminalTab openAgentSession() {
+        return openAgentSession(null);
+    }
+
+    TerminalTab openAgentSession(java.nio.file.Path overrideWs) {
+        String path = workspacePath.getText().trim();
+        Path ws = overrideWs != null
+            ? overrideWs
+            : Paths.get(path.isEmpty() ? System.getProperty("user.home") : path);
+        if (!Files.isDirectory(ws)) {
+            appendLog("[AEGIS] Cannot open agent session — invalid workspace: " + ws);
+            return null;
+        }
+        try {
+            ensureSessions();
+        } catch (Exception e) {
+            appendLog("[AEGIS] Session infrastructure unavailable: " + e.getMessage());
+            return null;
+        }
+        try {
+            TerminalTab tab = TerminalTab.create(ws, sessionManager);
+            centerTabs.getTabs().add(tab);
+            centerTabs.getSelectionModel().select(tab);
+            return tab;
+        } catch (Exception e) {
+            appendLog("[AEGIS] Failed to open agent session: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Approval-card listener — always marshalled onto the FX thread. */
+    private void onApprovalsChanged(List<aegis.session.ApprovalService.PendingRequest> requests) {
+        Platform.runLater(() -> rebuildApprovalCard(requests));
+    }
+
+    private void rebuildApprovalCard(
+            List<aegis.session.ApprovalService.PendingRequest> requests) {
+        approvalRows.getChildren().clear();
+        boolean show = requests != null && !requests.isEmpty();
+        approvalCard.setVisible(show);
+        approvalCard.setManaged(show);
+        if (!show || sessionManager == null) {
+            return;
+        }
+        String user = System.getProperty("user.name", "operator");
+        for (aegis.session.ApprovalService.PendingRequest r : requests) {
+            Label cmd = new Label(r.command());
+            cmd.setFont(Font.font("Monospaced", 11));
+            cmd.setWrapText(true);
+
+            Label meta = new Label(r.id() + " · session " + r.sessionId()
+                + " · " + r.reason());
+            meta.setFont(Font.font("System", 10));
+            meta.setTextFill(Color.ORANGE);
+            meta.setWrapText(true);
+
+            Button approve = new Button("Approve");
+            approve.getStyleClass().add("scan-button");
+            approve.setOnAction(e -> sessionManager.getApprovalService()
+                .approve(r.id(), user));
+
+            Button deny = new Button("Deny");
+            deny.setOnAction(e -> sessionManager.getApprovalService()
+                .deny(r.id(), user, "Denied from SECURITY APPROVAL REQUIRED card"));
+
+            HBox buttons = new HBox(8, approve, deny);
+            VBox row = new VBox(3, cmd, meta, buttons);
+            row.setPadding(new Insets(4));
+            row.setStyle("-fx-background-color: #1a1a2e; -fx-background-radius: 4;");
+            approvalRows.getChildren().add(row);
+        }
+        approvalCard.setExpanded(true);
+    }
+
+    /** Called on app shutdown: tears down every container + tailer. */
+    public void shutdownSessions() {
+        if (sessionManager != null) {
+            sessionManager.close();
+        }
+        if (sessionAudit != null) {
+            try {
+                sessionAudit.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    aegis.session.SessionManager getSessionManager() {
+        return sessionManager;
+    }
+
+    aegis.audit.AuditLogger getSessionAudit() {
+        return sessionAudit;
+    }
+
+    TabPane getCenterTabsForTest() {
+        return centerTabs;
+    }
+
+    /** SECURITY APPROVAL REQUIRED card (self-test access). */
+    TitledPane getApprovalCardForTest() {
+        return approvalCard;
     }
 
     /**

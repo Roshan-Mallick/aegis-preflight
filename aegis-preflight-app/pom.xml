@@ -6,7 +6,7 @@
 
     <groupId>aegis</groupId>
     <artifactId>aegis-preflight</artifactId>
-    <version>0.1.2</version>
+    <version>0.1.4</version>
     <packaging>jar</packaging>
 
     <name>Aegis PreFlight</name>

@@ -14,6 +14,8 @@ public class AegisApp extends Application {
     private static final int MIN_WIDTH = 1200;
     private static final int MIN_HEIGHT = 720;
 
+    private MainLayout mainLayout;
+
     @Override
     public void start(Stage primaryStage) {
         long appStart = System.currentTimeMillis();
@@ -44,7 +46,7 @@ public class AegisApp extends Application {
         llmThread.setDaemon(true);
         llmThread.start();
 
-        MainLayout mainLayout = new MainLayout();
+        mainLayout = new MainLayout();
 
         Scene scene = new Scene(mainLayout, MIN_WIDTH, MIN_HEIGHT);
         scene.getStylesheets().add(getClass().getResource("/styles/app.css").toExternalForm());
@@ -53,10 +55,23 @@ public class AegisApp extends Application {
         primaryStage.setScene(scene);
         primaryStage.setMinWidth(MIN_WIDTH);
         primaryStage.setMinHeight(MIN_HEIGHT);
-        primaryStage.setOnCloseRequest(e -> {
-            System.out.println("[Aegis] Window closing, stopping embedded LLM...");
-            EmbeddedLLM.get().stop();
-        });
+        if (Boolean.getBoolean("aegis.selftest")) {
+            // Unattended acceptance verification: the FX toolkit must be
+            // alive, but NO window may be interactable on the real desktop
+            // (window managers clamp off-screen coordinates back into view).
+            // Show-then-hide achieves that; scene snapshots are skipped by
+            // the driver while hidden. Termination remains possible via
+            // SIGTERM (shutdown hooks close every session).
+            primaryStage.setOnCloseRequest(javafx.event.Event::consume);
+            primaryStage.show();
+            primaryStage.hide();
+        } else {
+            primaryStage.setOnCloseRequest(e -> {
+                System.out.println("[Aegis] Window closing, stopping embedded LLM + agent sessions...");
+                EmbeddedLLM.get().stop();
+                mainLayout.shutdownSessions();
+            });
+        }
         primaryStage.show();
 
         long uiReady = System.currentTimeMillis() - appStart;
@@ -65,8 +80,9 @@ public class AegisApp extends Application {
 
     @Override
     public void stop() {
-        System.out.println("[Aegis] JavaFX stop() called, stopping embedded LLM...");
+        System.out.println("[Aegis] JavaFX stop() called, stopping embedded LLM + agent sessions...");
         EmbeddedLLM.get().stop();
+        mainLayout.shutdownSessions();
     }
 
     public static void main(String[] args) {

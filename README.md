@@ -17,6 +17,24 @@ the agent receives `findings.json`, self-fixes, and the scan repeats until PASS.
 Every decision is persisted to a SHA-256 hash-chained SQLite audit log with a
 one-click chain-integrity verification.
 
+## Guarded terminal (v0.1.4)
+
+The GUI ships an **embedded guarded terminal** for running agent commands:
+every typed command passes a three-state policy gate BEFORE execution —
+
+- `ALLOW` — runs immediately inside that tab's own Docker sandbox, output
+  streamed live (no fixed wall-clock cutoff),
+- `BLOCK` — never reaches `docker exec`; reason shown + `TOOL_BLOCKED`
+  audit row,
+- `REQUIRE_APPROVAL` — held and listed on the SECURITY APPROVAL REQUIRED
+  card until you Approve (executes) or Deny (audited as `DEVELOPER_OVERRIDE`,
+  never runs).
+
+Each session tab runs its own isolated container (`--network=none`,
+read-only rootfs); closing a tab tears down the container and its
+docker-events monitor. Policy comes from the bundled
+`policies/default-sandbox-policy.json`.
+
 ## The LLM is PACKED inside the app
 
 The incident-report LLM ships **inside the package**: a bundled llama.cpp
@@ -88,7 +106,7 @@ AF_UNIX  : docker.sock and pipes
 ## Install (deb)
 
 ```bash
-sudo apt install ./aegis-preflight_0.1.2_amd64.deb   # jar + Java runtime + LLM + all resources
+sudo apt install ./aegis-preflight_0.1.4_amd64.deb   # jar + Java runtime + LLM + all resources
 aegis-preflight                                       # GUI
 ```
 
@@ -111,7 +129,7 @@ by the PACKED engine (auto-started, cold-start-aware).
 
 ```bash
 cd aegis-preflight-app
-mvn package               # produces target/aegis-preflight-0.1.2-all.jar
+mvn package               # produces target/aegis-preflight-0.1.4-all.jar
 ../scripts/build-deb.sh   # packages the .deb: jlink runtime + resources +
                           # pinned llama.cpp engine + sha256-verified GGUF
                           # (needs JDK 17 jmods; fetches JavaFX jmods once)

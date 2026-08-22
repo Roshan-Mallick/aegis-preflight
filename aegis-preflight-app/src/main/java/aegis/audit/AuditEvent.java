@@ -47,6 +47,9 @@ public record AuditEvent(
         ACTIVITY_FLAGGED,
         NETWORK_BLOCKED,
         TOOL_BLOCKED,
+        COMMAND_ALLOWED,
+        APPROVAL_REQUESTED,
+        APPROVAL_GRANTED,
         CHAIN_VERIFIED
     }
 

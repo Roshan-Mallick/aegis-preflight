@@ -6,7 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.Reader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -45,9 +48,27 @@ public class PolicyEngine {
         return policy;
     }
 
+    public static final String DEFAULT_POLICY_RESOURCE = "/policies/default-sandbox-policy.json";
+
+    /**
+     * Loads the bundled default policy packaged inside the app resources —
+     * zero external filesystem dependency, matching the self-contained
+     * packaging direction. (The previous /policies/... absolute path never
+     * existed on disk.)
+     */
     public static SandboxPolicy loadDefault() throws PolicyException {
-        Path defaultPath = Path.of("/policies/default-sandbox-policy.json");
-        return loadFromFile(defaultPath);
+        InputStream in = PolicyEngine.class.getResourceAsStream(DEFAULT_POLICY_RESOURCE);
+        if (in == null) {
+            throw new PolicyException("Bundled default policy not found on classpath: "
+                + DEFAULT_POLICY_RESOURCE);
+        }
+        try (Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+            SandboxPolicy policy = gson.fromJson(reader, SandboxPolicy.class);
+            validate(policy);
+            return policy;
+        } catch (IOException e) {
+            throw new PolicyException("Failed to read bundled default policy: " + e.getMessage(), e);
+        }
     }
 
     public DockerFlagBuilder buildDockerFlags(String hostWorkspace) {

@@ -95,6 +95,32 @@ public class SandboxManager implements AutoCloseable {
         return outcome;
     }
 
+    /**
+     * Streaming variant of {@link #exec(String)} for the guarded terminal:
+     * output is delivered LIVE per line (no fixed wall-clock cap), and every
+     * line still flows through the same ActivityMonitor ingestion as batched
+     * execs ([AEGIS-EVENT] markers, secret patterns, ...).
+     *
+     * @return process exit code (-1 if killed by idle timeout or stream error)
+     */
+    public synchronized int execStreaming(String command, Consumer<String> lineConsumer)
+            throws SandboxException {
+        requireStarted();
+        final long started = System.currentTimeMillis();
+        int exitCode = sandbox.execStreaming(command, line -> {
+            if (monitor != null) {
+                monitor.ingestAgentOutput(line);
+            }
+            lineConsumer.accept(line);
+        });
+        if (monitor != null) {
+            monitor.ingestProcessExec(command);
+        }
+        log.debug("Streaming exec in {} finished: exit={} duration={}ms",
+            sandbox.getContainerName(), exitCode, System.currentTimeMillis() - started);
+        return exitCode;
+    }
+
     public void suspend() throws SandboxException {
         requireStarted();
         sandbox.pause();

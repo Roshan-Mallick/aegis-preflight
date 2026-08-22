@@ -200,6 +200,60 @@ public class AuditLogger implements AutoCloseable {
         ));
     }
 
+    // --- Guarded-terminal command gate ---
+
+    /**
+     * One hash-chained row per pre-execution CommandGate decision.
+     * ALLOW -> COMMAND_ALLOWED, BLOCK -> TOOL_BLOCKED (the command never
+     * reached docker exec), REQUIRE_APPROVAL -> APPROVAL_REQUESTED.
+     */
+    public void logCommandDecision(String command, aegis.policy.CommandDecision decision,
+                                   String sessionId) throws AuditException {
+        AuditEvent.EventType type = switch (decision) {
+            case ALLOW -> AuditEvent.EventType.COMMAND_ALLOWED;
+            case BLOCK -> AuditEvent.EventType.TOOL_BLOCKED;
+            case REQUIRE_APPROVAL -> AuditEvent.EventType.APPROVAL_REQUESTED;
+        };
+        AuditEvent.Severity severity = switch (decision) {
+            case ALLOW -> AuditEvent.Severity.INFO;
+            case BLOCK -> AuditEvent.Severity.ERROR;
+            case REQUIRE_APPROVAL -> AuditEvent.Severity.WARNING;
+        };
+        auditStore.writeEvent(new AuditEvent(
+            -1, java.time.Instant.now(), type,
+            AuditStore.payloadToJson(new AuditEvent.Payload(
+                severity.name(),
+                "CommandGate",
+                "Command gate decision: " + decision.label(),
+                String.format("session=%s command=%s reason=%s",
+                    sessionId == null ? "-" : sessionId, abbreviate(command), decision.reason())
+            )),
+            null, null));
+    }
+
+    /** A human approved a held command; it is about to execute. */
+    public void logApprovalGranted(String command, String user) throws AuditException {
+        auditStore.writeEvent(AuditEvent.info(
+            AuditEvent.EventType.APPROVAL_GRANTED,
+            user == null || user.isBlank() ? "Operator" : user,
+            "Security approval GRANTED — held command released for execution",
+            "command=" + abbreviate(command)
+        ));
+    }
+
+    /** A human denied a held command; it will never execute. */
+    public void logApprovalDenied(String command, String user, String justification)
+            throws AuditException {
+        auditStore.writeEvent(AuditEvent.critical(
+            AuditEvent.EventType.DEVELOPER_OVERRIDE,
+            user == null || user.isBlank() ? "Operator" : user,
+            "Security approval DENIED — command rejected before execution",
+            String.format("justification=%s command=%s",
+                justification == null || justification.isBlank() ? "(none)" : justification,
+                abbreviate(command))
+        ));
+    }
+
     public void logChainVerified(AuditStore.ChainVerification verification) throws AuditException {
         auditStore.writeEvent(AuditEvent.info(
             AuditEvent.EventType.CHAIN_VERIFIED,
