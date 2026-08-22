@@ -200,3 +200,17 @@
 .split-pane > .split-pane-divider:pressed {
     -fx-background-color: #7c3aed;
 }
+
+/* Vertical main splitter between Scan Results (top) and the
+   Detailed Findings / Security Report row (bottom). Same theme colors as the
+   horizontal splitter, but with top/bottom padding so the drag handle is
+   visible and easy to grab. */
+.main-split > .split-pane-divider {
+    -fx-background-color: #333355;
+    -fx-padding: 3 0 3 0;
+}
+
+.main-split > .split-pane-divider:hover,
+.main-split > .split-pane-divider:pressed {
+    -fx-background-color: #7c3aed;
+}

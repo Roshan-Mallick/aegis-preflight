@@ -27,7 +27,7 @@ VERSION="$(xmllint --xpath 'string(/*[local-name()="project"]/*[local-name()="ve
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-JAR="$(ls "$APP"/target/aegis-preflight-*-"all".jar 2>/dev/null | head -1 || true)"
+JAR="$(ls -t "$APP"/target/aegis-preflight-*-"all".jar 2>/dev/null | head -1 || true)"
 [ -n "$JAR" ] || { echo "jar not built — run: (cd aegis-preflight-app && mvn package)"; exit 1; }
 
 JLINK_BIN="$(command -v jlink || echo /usr/lib/jvm/java-17-openjdk-amd64/bin/jlink)"
